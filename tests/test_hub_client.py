@@ -178,6 +178,48 @@ async def test_try_cancel_only_when_empty(hass: HomeAssistant) -> None:
     assert task.cancelled()
 
 
+async def test_add_switch_starts_event_listener(hass: HomeAssistant) -> None:
+    """Adding the first switch should start the event listener task."""
+    client = _make_hub_client(hass)
+
+    with patch.object(client, "_try_start_event_listener_task") as mock_start:
+        await client.add_switch(_mock_entity("s1"))
+
+    assert "s1" in client._switch_map
+    mock_start.assert_called_once()
+
+
+async def test_remove_switch_cancels_listener_when_last(hass: HomeAssistant) -> None:
+    """Removing the last switch should cancel the event listener task."""
+    client = _make_hub_client(hass)
+    client._switch_map = {"s1": _mock_entity("s1")}
+
+    with patch.object(client, "_try_cancel_event_listener_task", new_callable=AsyncMock) as mock_cancel:
+        await client.remove_switch(_mock_entity("s1"))
+
+    assert "s1" not in client._switch_map
+    mock_cancel.assert_awaited_once()
+
+
+async def test_switches_count_towards_listener_lifecycle(hass: HomeAssistant) -> None:
+    """A registered switch must keep the listener alive after the last light goes."""
+    client = _make_hub_client(hass)
+    client._light_map = {"l1": _mock_entity("l1")}
+    client._switch_map = {"s1": _mock_entity("s1")}
+
+    async def noop():
+        await asyncio.sleep(100)
+
+    task = asyncio.create_task(noop())
+    client._event_listener_task = task
+
+    await client.remove_light(_mock_entity("l1"))
+    assert not task.cancelled()
+
+    await client.remove_switch(_mock_entity("s1"))
+    assert task.cancelled()
+
+
 # ---------------------------------------------------------------------------
 # subscribe_to_events
 # ---------------------------------------------------------------------------
@@ -314,3 +356,23 @@ async def test_subscribe_ignores_unmatched_events(hass: HomeAssistant) -> None:
     )
     # Should not raise
     await _run_subscribe_with_events(client, [event])
+
+
+async def test_subscribe_level_changed_updates_switch(hass: HomeAssistant) -> None:
+    """LevelChangedEvent should update the matching switch's level."""
+    client = MagicMock()
+    client.hub_id = MOCK_HUB_ID
+
+    switch = MagicMock()
+    uid = f"{MOCK_HUB_ID}_11_1"
+    client._switch_map = {uid: switch}
+    client._light_map = {}
+    client._cover_map = {}
+    client._scene_map = {}
+
+    event = LevelChangedEvent(
+        room_id=11, channel_id=1, current_level=0, target_level=255, time_to_take=0, temporary=False
+    )
+    await _run_subscribe_with_events(client, [event])
+
+    assert switch.level == 255

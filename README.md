@@ -6,6 +6,16 @@ This integration allows users to control Rako lighting system over the local net
 > [!IMPORTANT]
 > This integration works with Rako hubs like [RK-HUB](https://rakocontrols.com/rkhub/) or [WK-HUB](https://rakocontrols.com/wkhub/).
 
+# Supported room types
+
+| Rako room type | Home Assistant entities |
+|---|---|
+| Light | A light for the whole room plus one light per channel, with brightness |
+| Blind / Curtain | One cover per channel, with position |
+| Switch (e.g. extract fan, towel rail) | One on/off switch per channel |
+
+Every room also gets a scene selector.
+
 # Installation
 
 When using [HACS](https://hacs.xyz/), select `HACS`, search for the `rako` integration, select it, and press the `Download` button to install to download the integration. Now continue the installation as described at [Using config flow](https://github.com/princekama/hacs-rako/blob/main/README.md#using-config-flow)

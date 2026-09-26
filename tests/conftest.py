@@ -129,6 +129,32 @@ def mock_blind_room(mock_blind_channel, mock_curtain_channel, mock_scenes) -> Ro
     )
 
 
+@pytest.fixture
+def mock_switch_channel() -> Channel:
+    """Return a mock switch channel."""
+    return Channel(
+        id=1,
+        title="Extract Fan",
+        type="SWITCH",
+        color_type=None,
+        color_title=None,
+        multi_channel_component=None,
+    )
+
+
+@pytest.fixture
+def mock_switch_room(mock_switch_channel) -> Room:
+    """Return a mock switch room (as reported by a hub for an extract fan)."""
+    return Room(
+        id=11,
+        title="Extract Fan",
+        type="SWITCH",
+        mode=None,
+        channels=[mock_switch_channel],
+        scenes=[Scene(id=0, title="Off"), Scene(id=1, title="On")],
+    )
+
+
 def make_channel_level(
     channel_id: int, current_level: int, target_level: int | None = None
 ) -> ChannelLevel:
@@ -208,6 +234,8 @@ def mock_hub_client(
     client.remove_cover = AsyncMock()
     client.add_scene = AsyncMock()
     client.remove_scene = AsyncMock()
+    client.add_switch = AsyncMock()
+    client.remove_switch = AsyncMock()
     client.get_events = MagicMock()
 
     return client

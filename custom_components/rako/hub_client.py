@@ -7,6 +7,7 @@ import logging
 from homeassistant.components.cover import CoverEntity
 from homeassistant.components.light import LightEntity
 from homeassistant.components.select import SelectEntity
+from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
 from rakopy.hub import Hub
 from rakopy.model import LevelChangedEvent, SceneChangedEvent
@@ -34,6 +35,7 @@ class HubClient(Hub):
         self._cover_map: dict[str, CoverEntity] = {}
         self._light_map: dict[str, LightEntity] = {}
         self._scene_map: dict[str, SelectEntity] = {}
+        self._switch_map: dict[str, SwitchEntity] = {}
 
     @property
     def hub_id(self) -> str:
@@ -58,6 +60,11 @@ class HubClient(Hub):
         self._scene_map[select.unique_id] = select
         self._try_start_event_listener_task()
 
+    async def add_switch(self, switch: SwitchEntity) -> None:
+        """Register a switch to listen for state updates."""
+        self._switch_map[switch.unique_id] = switch
+        self._try_start_event_listener_task()
+
     async def remove_cover(self, cover: CoverEntity) -> None:
         """Deregister a cover to listen for state updates."""
         if cover.unique_id in self._cover_map:
@@ -76,9 +83,22 @@ class HubClient(Hub):
             del self._scene_map[select.unique_id]
             await self._try_cancel_event_listener_task()
 
+    async def remove_switch(self, switch: SwitchEntity) -> None:
+        """Deregister a switch to listen for state updates."""
+        if switch.unique_id in self._switch_map:
+            del self._switch_map[switch.unique_id]
+            await self._try_cancel_event_listener_task()
+
+    def _total_entities(self) -> int:
+        """Return the number of entities registered for state updates."""
+        return (
+            len(self._light_map) + len(self._scene_map)
+            + len(self._cover_map) + len(self._switch_map)
+        )
+
     def _try_start_event_listener_task(self) -> None:
         """Start the event listener task."""
-        total_entities = len(self._light_map) + len(self._scene_map) + len(self._cover_map)
+        total_entities = self._total_entities()
         if total_entities == 1:
             self._event_listener_task: Task = asyncio.create_task(
                 subscribe_to_events(self), name=f"rako_{self.hub_id}_event_listener_task"
@@ -86,7 +106,7 @@ class HubClient(Hub):
 
     async def _try_cancel_event_listener_task(self) -> None:
         """Try to cancel event listener task."""
-        total_entities = len(self._light_map) + len(self._scene_map) + len(self._cover_map)
+        total_entities = self._total_entities()
         if total_entities == 0:
             if event_listener_task := self._event_listener_task:
                 event_listener_task.cancel()
@@ -114,6 +134,13 @@ async def subscribe_to_events(hub_client: HubClient) -> None:
                         hub_client._light_map[unique_id].brightness = event.target_level
                     else:
                         hub_client._light_map[unique_id].brightness = event.current_level
+
+                # Handle switch entities
+                if unique_id in hub_client._switch_map:
+                    if event.target_level is not None:
+                        hub_client._switch_map[unique_id].level = event.target_level
+                    else:
+                        hub_client._switch_map[unique_id].level = event.current_level
 
             elif event and isinstance(event, SceneChangedEvent):
                 unique_id = f"{hub_client.hub_id}_{event.room_id}"
