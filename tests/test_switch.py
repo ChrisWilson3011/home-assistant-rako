@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.rako.hub_client import subscribe_to_events
 from custom_components.rako.switch import RakoSwitchEntity, async_setup_entry
@@ -224,13 +225,14 @@ async def test_turn_off(mock_hub_client) -> None:
 
 
 async def test_turn_on_send_error_keeps_state(mock_hub_client) -> None:
-    """A failed command should be logged and leave the state unchanged."""
+    """A failed command is reported and leaves the state unchanged."""
     mock_hub_client.set_level.side_effect = SendCommandError("fail")
     switch = _make_switch(mock_hub_client, current_level=0)
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(switch, "async_write_ha_state", lambda: None)
-        await switch.async_turn_on()
+        with pytest.raises(HomeAssistantError):
+            await switch.async_turn_on()
 
     assert switch.is_on is False
 

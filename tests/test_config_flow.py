@@ -120,3 +120,12 @@ async def test_step_user_duplicate_unique_id(hass: HomeAssistant, mock_hub) -> N
     )
     assert result2["type"] is FlowResultType.ABORT
     assert result2["reason"] == "already_configured"
+
+
+async def test_validate_closes_its_connection(hass: HomeAssistant, mock_hub) -> None:
+    """The connection opened to check the hub is closed afterwards."""
+    from custom_components.rako.config_flow import validate_input
+
+    await validate_input(hass, MOCK_USER_INPUT)
+
+    mock_hub.return_value._writer.close.assert_called_once()

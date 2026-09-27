@@ -14,9 +14,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from rakopy.errors import SendCommandError
+from homeassistant.exceptions import HomeAssistantError
 from rakopy.model import Channel, ChannelLevel, Room
-from .hub_client import HubClient
+from .hub_client import COMMAND_ERRORS, HubClient
 from .model import RakoDomainEntryData
 
 _LOGGER = logging.getLogger(__name__)
@@ -179,8 +179,10 @@ class RakoCoverEntity(CoverEntity):
             # Update position optimistically
             self._current_position = 100
             self.async_write_ha_state()
-        except SendCommandError:
-            _LOGGER.error("An error occurred while opening the Rako Cover")
+        except COMMAND_ERRORS as err:
+            raise HomeAssistantError(
+                f"Rako hub did not open {self.name}: {err!r}"
+            ) from err
 
     async def async_close_cover(self, **kwargs: Any) -> None:
         """Close the cover."""
@@ -190,16 +192,20 @@ class RakoCoverEntity(CoverEntity):
             # Update position optimistically  
             self._current_position = 0
             self.async_write_ha_state()
-        except SendCommandError:
-            _LOGGER.error("An error occurred while closing the Rako Cover")
+        except COMMAND_ERRORS as err:
+            raise HomeAssistantError(
+                f"Rako hub did not close {self.name}: {err!r}"
+            ) from err
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
         """Stop the cover."""
         try:
             # Send stop command using scene 3 (based on Rako documentation)
             await self._hub_client.set_scene(self._room.id, self._channel.id, 3)
-        except SendCommandError:
-            _LOGGER.error("An error occurred while stopping the Rako Cover")
+        except COMMAND_ERRORS as err:
+            raise HomeAssistantError(
+                f"Rako hub did not stop {self.name}: {err!r}"
+            ) from err
 
     async def async_set_cover_position(self, **kwargs: Any) -> None:
         """Move the cover to a specific position."""
@@ -218,5 +224,7 @@ class RakoCoverEntity(CoverEntity):
             self._current_position = position
             self.async_write_ha_state()
             
-        except SendCommandError:
-            _LOGGER.error("An error occurred while setting the Rako Cover position")
+        except COMMAND_ERRORS as err:
+            raise HomeAssistantError(
+                f"Rako hub did not move {self.name}: {err!r}"
+            ) from err

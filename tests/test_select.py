@@ -5,8 +5,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.rako.select import RakoSceneEntity, async_setup_entry
+from rakopy.errors import SendCommandError
 from rakopy.model import Room, Scene
 
 from tests.conftest import MOCK_HUB_ID
@@ -193,3 +195,12 @@ async def test_async_will_remove_from_hass(mock_hub_client) -> None:
     entity = _make_scene_entity(mock_hub_client)
     await entity.async_will_remove_from_hass()
     mock_hub_client.remove_scene.assert_awaited_once_with(entity)
+
+
+async def test_select_option_failure_is_reported(mock_hub_client) -> None:
+    """A scene the hub refuses is reported, not silently ignored."""
+    mock_hub_client.set_scene = AsyncMock(side_effect=SendCommandError("fail"))
+    entity = _make_scene_entity(mock_hub_client, current_scene_id=0)
+
+    with pytest.raises(HomeAssistantError):
+        await entity.async_select_option("Scene 1")

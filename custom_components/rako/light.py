@@ -13,9 +13,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from rakopy.errors import SendCommandError
+from homeassistant.exceptions import HomeAssistantError
 from rakopy.model import Channel, ChannelLevel, Room
-from .hub_client import HubClient
+from .hub_client import COMMAND_ERRORS, HubClient
 from .model import RakoDomainEntryData
 
 _LOGGER = logging.getLogger(__name__)
@@ -144,7 +144,12 @@ class RakoLightEntity(LightEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
         if not self._channel:
-            await self._hub_client.set_scene(self._room.id, 0, 0)
+            try:
+                await self._hub_client.set_scene(self._room.id, 0, 0)
+            except COMMAND_ERRORS as err:
+                raise HomeAssistantError(
+                    f"Rako hub did not turn off {self.name}: {err!r}"
+                ) from err
         else:
             await self.async_turn_on(brightness=0)
 
@@ -158,5 +163,9 @@ class RakoLightEntity(LightEntity):
                 await self._hub_client.set_level(self._room.id, 0, brightness)
             self.brightness = brightness
 
-        except (SendCommandError):
-            _LOGGER.error("An error occurred while updating the Rako Light")
+        except COMMAND_ERRORS as err:
+            # Raised, not just logged, so Home Assistant shows the failure
+            # instead of looking as if the light had changed.
+            raise HomeAssistantError(
+                f"Rako hub did not change {self.name}: {err!r}"
+            ) from err

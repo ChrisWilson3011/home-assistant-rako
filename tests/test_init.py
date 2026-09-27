@@ -147,3 +147,27 @@ async def test_setup_not_ready_when_hub_hangs(
         pytest.raises(ConfigEntryNotReady),
     ):
         await async_setup_entry(hass, mock_entry)
+
+
+async def test_unload_closes_the_command_connection(hass: HomeAssistant, mock_entry) -> None:
+    """A reload no longer leaves the old connection open."""
+    client = MagicMock()
+    mock_entry.runtime_data = {"hub_id": MOCK_HUB_ID, "hub_client": client}
+    with patch.object(
+        hass.config_entries, "async_unload_platforms",
+        new_callable=AsyncMock, return_value=True,
+    ):
+        assert await async_unload_entry(hass, mock_entry) is True
+    client.drop_command_connection.assert_called_once()
+
+
+async def test_failed_unload_keeps_the_connection(hass: HomeAssistant, mock_entry) -> None:
+    """If the platforms did not unload, the connection is left in use."""
+    client = MagicMock()
+    mock_entry.runtime_data = {"hub_id": MOCK_HUB_ID, "hub_client": client}
+    with patch.object(
+        hass.config_entries, "async_unload_platforms",
+        new_callable=AsyncMock, return_value=False,
+    ):
+        assert await async_unload_entry(hass, mock_entry) is False
+    client.drop_command_connection.assert_not_called()

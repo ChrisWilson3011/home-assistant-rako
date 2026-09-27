@@ -9,8 +9,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.exceptions import HomeAssistantError
 from rakopy.model import Room
-from .hub_client import HubClient
+from .hub_client import COMMAND_ERRORS, HubClient
 from .model import RakoDomainEntryData
 
 _LOGGER = logging.getLogger(__name__)
@@ -113,4 +114,9 @@ class RakoSceneEntity(SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         """Change the selected option."""
-        await self._hub_client.set_scene(self._room.id, 0, self._reverse_lookup[option])
+        try:
+            await self._hub_client.set_scene(self._room.id, 0, self._reverse_lookup[option])
+        except COMMAND_ERRORS as err:
+            raise HomeAssistantError(
+                f"Rako hub did not set {self.name} to {option}: {err!r}"
+            ) from err

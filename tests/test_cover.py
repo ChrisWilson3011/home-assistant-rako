@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 from homeassistant.components.cover import ATTR_POSITION, CoverDeviceClass, CoverEntityFeature
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.rako.cover import RakoCoverEntity, async_setup_entry
 from rakopy.errors import SendCommandError
@@ -319,39 +320,39 @@ async def test_set_cover_position_none(mock_hub_client) -> None:
 
 
 async def test_open_cover_send_command_error(mock_hub_client) -> None:
-    """SendCommandError during open_cover should be caught."""
+    """A refused command during open_cover is reported, not hidden."""
     mock_hub_client.set_scene = AsyncMock(side_effect=SendCommandError("fail"))
     cover = _make_cover(mock_hub_client)
 
-    # Should not raise
-    await cover.async_open_cover()
+    with pytest.raises(HomeAssistantError):
+        await cover.async_open_cover()
 
 
 async def test_close_cover_send_command_error(mock_hub_client) -> None:
-    """SendCommandError during close_cover should be caught."""
+    """A refused command during close_cover is reported, not hidden."""
     mock_hub_client.set_scene = AsyncMock(side_effect=SendCommandError("fail"))
     cover = _make_cover(mock_hub_client)
 
-    # Should not raise
-    await cover.async_close_cover()
+    with pytest.raises(HomeAssistantError):
+        await cover.async_close_cover()
 
 
 async def test_stop_cover_send_command_error(mock_hub_client) -> None:
-    """SendCommandError during stop_cover should be caught."""
+    """A refused command during stop_cover is reported, not hidden."""
     mock_hub_client.set_scene = AsyncMock(side_effect=SendCommandError("fail"))
     cover = _make_cover(mock_hub_client)
 
-    # Should not raise
-    await cover.async_stop_cover()
+    with pytest.raises(HomeAssistantError):
+        await cover.async_stop_cover()
 
 
 async def test_set_position_send_command_error(mock_hub_client) -> None:
-    """SendCommandError during set_cover_position should be caught."""
+    """A refused command during set_cover_position is reported, not hidden."""
     mock_hub_client.set_level = AsyncMock(side_effect=SendCommandError("fail"))
     cover = _make_cover(mock_hub_client)
 
-    # Should not raise
-    await cover.async_set_cover_position(**{ATTR_POSITION: 50})
+    with pytest.raises(HomeAssistantError):
+        await cover.async_set_cover_position(**{ATTR_POSITION: 50})
 
 
 # ---------------------------------------------------------------------------
@@ -370,3 +371,12 @@ async def test_async_will_remove_from_hass(mock_hub_client) -> None:
     cover = _make_cover(mock_hub_client)
     await cover.async_will_remove_from_hass()
     mock_hub_client.remove_cover.assert_awaited_once_with(cover)
+
+
+async def test_cover_connection_error_is_reported(mock_hub_client) -> None:
+    """A dead connection (after the client's own retry) is reported too."""
+    mock_hub_client.set_scene = AsyncMock(side_effect=ConnectionResetError("hub gone"))
+    cover = _make_cover(mock_hub_client)
+
+    with pytest.raises(HomeAssistantError):
+        await cover.async_open_cover()

@@ -9,6 +9,7 @@ from homeassistant.components.light import LightEntity
 from homeassistant.components.select import SelectEntity
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
+from rakopy.errors import SendCommandError
 from rakopy.hub import Hub
 from rakopy.model import LevelChangedEvent, SceneChangedEvent
 from .model import RakoDomainEntryData
@@ -19,6 +20,17 @@ _LOGGER = logging.getLogger(__name__)
 # maximum while the hub stays unreachable.
 RECONNECT_DELAY_MIN = 5
 RECONNECT_DELAY_MAX = 60
+
+# How long a single command or query may wait for the hub's reply.
+COMMAND_TIMEOUT = 10
+
+# Failures of the connection itself: worth a fresh connection and one retry.
+# An empty or broken reply surfaces as ValueError (json.loads), a dead or
+# refused socket as OSError, a hub that never replies as TimeoutError.
+CONNECTION_ERRORS = (OSError, ValueError, TimeoutError, asyncio.IncompleteReadError)
+
+# Everything an entity should report back to the user as a failed command.
+COMMAND_ERRORS = (SendCommandError, *CONNECTION_ERRORS)
 
 
 class HubClient(Hub):
@@ -108,6 +120,34 @@ class HubClient(Hub):
             self._event_listener_task: Task = asyncio.create_task(
                 run_event_listener(self), name=f"rako_{self.hub_id}_event_listener_task"
             )
+
+    async def _send(self, request) -> None:
+        """Send a command, with a time limit and one retry on a fresh connection."""
+        await self._with_retry(super()._send, request)
+
+    async def _query(self, query_type: str, func, room_id: int = None):
+        """Run a query, with a time limit and one retry on a fresh connection."""
+        return await self._with_retry(super()._query, query_type, func, room_id)
+
+    async def _with_retry(self, call, *args):
+        """Run a rakopy request, recovering from a dead connection once.
+
+        rakopy holds its lock while it waits for the hub's reply, with no time
+        limit, so one reply that never came queued every later command behind
+        it for good - the lights simply stopped responding. It also reuses a
+        socket the hub has already dropped. Each attempt is now time-limited,
+        and a connection failure drops the socket and tries once more on a
+        new one. A SendCommandError (the hub answered "no") is not retried.
+        """
+        for attempt in (1, 2):
+            try:
+                async with asyncio.timeout(COMMAND_TIMEOUT):
+                    return await call(*args)
+            except CONNECTION_ERRORS as err:
+                self.drop_command_connection()
+                if attempt == 2:
+                    raise
+                _LOGGER.info("Rako hub connection failed (%s); retrying once", repr(err))
 
     def drop_command_connection(self) -> None:
         """Forget the command connection so the next request opens a new one.

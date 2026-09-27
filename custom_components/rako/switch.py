@@ -9,9 +9,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from rakopy.errors import SendCommandError
+from homeassistant.exceptions import HomeAssistantError
 from rakopy.model import Channel, ChannelLevel, Room
-from .hub_client import HubClient
+from .hub_client import COMMAND_ERRORS, HubClient
 from .model import RakoDomainEntryData
 
 _LOGGER = logging.getLogger(__name__)
@@ -141,5 +141,7 @@ class RakoSwitchEntity(SwitchEntity):
         try:
             await self._hub_client.set_level(self._room.id, self._channel.id, level)
             self.level = level
-        except SendCommandError:
-            _LOGGER.error("An error occurred while updating the Rako Switch")
+        except COMMAND_ERRORS as err:
+            raise HomeAssistantError(
+                f"Rako hub did not change {self.name}: {err!r}"
+            ) from err

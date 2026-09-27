@@ -8,9 +8,11 @@ from homeassistant.core import HomeAssistant
 from rakopy.model import LevelChangedEvent, SceneChangedEvent
 
 import pytest
+from rakopy.errors import SendCommandError
 from rakopy.model import Level
 
 from custom_components.rako.hub_client import (
+    COMMAND_TIMEOUT,
     RECONNECT_DELAY_MAX,
     RECONNECT_DELAY_MIN,
     HubClient,
@@ -502,3 +504,78 @@ async def test_drop_command_connection_without_a_connection(hass: HomeAssistant)
     client = _make_hub_client(hass)
     client.drop_command_connection()
     assert client._writer is None
+
+
+# ---------------------------------------------------------------------------
+# Commands and queries: time limit, one retry on a fresh connection
+# ---------------------------------------------------------------------------
+
+async def test_with_retry_returns_first_success(hass: HomeAssistant) -> None:
+    """A working hub is asked once."""
+    client = _make_hub_client(hass)
+    call = AsyncMock(return_value="ok")
+    with patch.object(client, "drop_command_connection") as drop:
+        assert await client._with_retry(call, 1) == "ok"
+    call.assert_awaited_once_with(1)
+    drop.assert_not_called()
+
+
+async def test_with_retry_reconnects_once_after_dead_connection(hass: HomeAssistant) -> None:
+    """A dead socket is dropped and the request repeated on a new one."""
+    client = _make_hub_client(hass)
+    call = AsyncMock(side_effect=[ValueError("empty reply"), "ok"])
+    with patch.object(client, "drop_command_connection") as drop:
+        assert await client._with_retry(call) == "ok"
+    assert call.await_count == 2
+    drop.assert_called_once()
+
+
+async def test_with_retry_gives_up_after_second_failure(hass: HomeAssistant) -> None:
+    """Two connection failures in a row are raised to the caller."""
+    client = _make_hub_client(hass)
+    call = AsyncMock(side_effect=ConnectionResetError("hub gone"))
+    with patch.object(client, "drop_command_connection") as drop, \
+            pytest.raises(ConnectionResetError):
+        await client._with_retry(call)
+    assert call.await_count == 2
+    assert drop.call_count == 2
+
+
+async def test_with_retry_does_not_repeat_a_refused_command(hass: HomeAssistant) -> None:
+    """The hub answering "no" is not a connection fault: no retry."""
+    client = _make_hub_client(hass)
+    call = AsyncMock(side_effect=SendCommandError("bad room"))
+    with patch.object(client, "drop_command_connection") as drop, \
+            pytest.raises(SendCommandError):
+        await client._with_retry(call)
+    call.assert_awaited_once()
+    drop.assert_not_called()
+
+
+async def test_with_retry_times_out_a_hub_that_never_replies(hass: HomeAssistant) -> None:
+    """A reply that never comes no longer blocks every later command."""
+    client = _make_hub_client(hass)
+
+    async def never_replies():
+        await asyncio.sleep(3600)
+
+    with patch("custom_components.rako.hub_client.COMMAND_TIMEOUT", 0.05), \
+            patch.object(client, "drop_command_connection") as drop, \
+            pytest.raises(TimeoutError):
+        await client._with_retry(never_replies)
+    assert drop.call_count == 2
+
+
+async def test_send_and_query_go_through_the_retry(hass: HomeAssistant) -> None:
+    """rakopy's _send and _query are both wrapped."""
+    client = _make_hub_client(hass)
+    with patch.object(client, "_with_retry", AsyncMock(return_value=["x"])) as wr:
+        await client._send({"name": "send"})
+        assert await client._query("LEVEL", str, 3) == ["x"]
+    assert wr.await_count == 2
+    assert wr.await_args_list[1].args[1:] == ("LEVEL", str, 3)
+
+
+def test_command_timeout_is_sane() -> None:
+    """Long enough for a busy hub, short enough that a stuck one is noticed."""
+    assert 3 <= COMMAND_TIMEOUT <= 30

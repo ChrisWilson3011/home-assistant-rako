@@ -66,4 +66,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: RakoConfigEntry) -> bool
 
 async def async_unload_entry(hass: HomeAssistant, entry: RakoConfigEntry) -> bool:
     """Unload a config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded and entry.runtime_data:
+        # Every reload used to leave the old command connection open.
+        entry.runtime_data["hub_client"].drop_command_connection()
+    return unloaded

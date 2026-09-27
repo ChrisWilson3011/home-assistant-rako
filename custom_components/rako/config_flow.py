@@ -37,6 +37,11 @@ async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str,
         )
     except Exception:
         raise CannotConnect
+    finally:
+        # The check's connection was never closed; each attempt left one open.
+        writer = getattr(hub, "_writer", None)
+        if writer is not None:
+            writer.close()
 
     return {"title": "Rako Hub", "hub_id": hub_info.id}
 

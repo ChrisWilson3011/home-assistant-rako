@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 from homeassistant.components.light import ATTR_BRIGHTNESS, ColorMode
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.rako.light import RakoLightEntity, async_setup_entry
 from rakopy.errors import SendCommandError
@@ -227,14 +228,15 @@ async def test_turn_off_channel_level(mock_hub_client) -> None:
 
 
 async def test_turn_on_send_command_error(mock_hub_client) -> None:
-    """SendCommandError during turn_on should be caught."""
+    """A refused turn_on is reported, and the brightness is left alone."""
     mock_hub_client.set_level = AsyncMock(side_effect=SendCommandError("fail"))
     ch = Channel(id=1, title="C", type="LIGHT", color_type=None, color_title=None, multi_channel_component=None)
     room = Room(id=1, title="R", type="LIGHT", mode="NORMAL", channels=[ch], scenes=[])
     light = _make_light(mock_hub_client, room=room, channel=ch, brightness=0)
 
-    # Should not raise
-    await light.async_turn_on()
+    with pytest.raises(HomeAssistantError):
+        await light.async_turn_on()
+    assert light._brightness == 0
 
 
 # ---------------------------------------------------------------------------
@@ -253,3 +255,13 @@ async def test_async_will_remove_from_hass(mock_hub_client) -> None:
     light = _make_light(mock_hub_client)
     await light.async_will_remove_from_hass()
     mock_hub_client.remove_light.assert_awaited_once_with(light)
+
+
+async def test_room_turn_off_failure_is_reported(mock_hub_client) -> None:
+    """Turning a whole room off (scene 0) reports a failure as well."""
+    mock_hub_client.set_scene = AsyncMock(side_effect=TimeoutError())
+    room = Room(id=1, title="R", type="LIGHT", mode="NORMAL", channels=[], scenes=[])
+    light = _make_light(mock_hub_client, room=room, channel=None, brightness=100)
+
+    with pytest.raises(HomeAssistantError):
+        await light.async_turn_off()
