@@ -15,6 +15,11 @@ from .model import RakoDomainEntryData
 
 _LOGGER = logging.getLogger(__name__)
 
+# Wait before reconnecting the event feed after it drops, doubling up to the
+# maximum while the hub stays unreachable.
+RECONNECT_DELAY_MIN = 5
+RECONNECT_DELAY_MAX = 60
+
 
 class HubClient(Hub):
     """Rako Hub Client."""
@@ -101,8 +106,22 @@ class HubClient(Hub):
         total_entities = self._total_entities()
         if total_entities == 1:
             self._event_listener_task: Task = asyncio.create_task(
-                subscribe_to_events(self), name=f"rako_{self.hub_id}_event_listener_task"
+                run_event_listener(self), name=f"rako_{self.hub_id}_event_listener_task"
             )
+
+    def drop_command_connection(self) -> None:
+        """Forget the command connection so the next request opens a new one.
+
+        rakopy only reconnects when the socket is already marked closing. After
+        the hub reboots, the old socket can sit half-open: every read returns
+        nothing and every command fails until Home Assistant is restarted.
+        """
+        writer = getattr(self, "_writer", None)
+        if writer is not None:
+            with contextlib.suppress(Exception):
+                writer.close()
+        self._reader = None
+        self._writer = None
 
     async def _try_cancel_event_listener_task(self) -> None:
         """Try to cancel event listener task."""
@@ -114,8 +133,66 @@ class HubClient(Hub):
                     await event_listener_task
 
 
+async def run_event_listener(hub_client: HubClient) -> None:
+    """Keep the hub's event feed running for as long as entities need it.
+
+    The feed ends or raises when the hub drops the connection (a reboot, a
+    network blip). Without this loop the listener task died with it and Home
+    Assistant stopped hearing about changes until the integration was
+    reloaded. Each reconnect first re-reads every level, so anything that
+    changed while the feed was down is picked up.
+    """
+    delay = RECONNECT_DELAY_MIN
+    first_run = True
+    while True:
+        try:
+            if not first_run:
+                await resync_levels(hub_client)
+                delay = RECONNECT_DELAY_MIN
+            first_run = False
+            await subscribe_to_events(hub_client)
+            _LOGGER.warning("Rako hub closed the event feed; reconnecting in %s s", delay)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - any failure means reconnect
+            first_run = False
+            _LOGGER.warning(
+                "Rako hub event feed lost (%s); reconnecting in %s s", repr(err), delay
+            )
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, RECONNECT_DELAY_MAX)
+
+
+async def resync_levels(hub_client: HubClient) -> None:
+    """Re-read every level from the hub and update the matching entities."""
+    try:
+        levels = await hub_client.get_levels()
+    except Exception:
+        hub_client.drop_command_connection()
+        raise
+
+    for level in levels:
+        scene_id = f"{hub_client.hub_id}_{level.room_id}"
+        if scene_id in hub_client._scene_map:
+            hub_client._scene_map[scene_id].current_option = level.current_scene_id
+
+        for channel_level in level.channel_levels:
+            unique_id = f"{hub_client.hub_id}_{level.room_id}_{channel_level.channel_id}"
+            value = (
+                channel_level.target_level
+                if channel_level.target_level is not None
+                else channel_level.current_level
+            )
+            if unique_id in hub_client._light_map:
+                hub_client._light_map[unique_id].brightness = value
+            if unique_id in hub_client._cover_map:
+                hub_client._cover_map[unique_id].current_cover_position = value
+            if unique_id in hub_client._switch_map:
+                hub_client._switch_map[unique_id].level = value
+
+
 async def subscribe_to_events(hub_client: HubClient) -> None:
-    """Subscribe to events method."""
+    """Handle events from the hub until the feed ends or fails."""
     async for event in hub_client.get_events():
         try:
             if event and isinstance(event, LevelChangedEvent):

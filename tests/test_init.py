@@ -3,8 +3,11 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import asyncio
+
 import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 
 from custom_components.rako import async_setup_entry, async_unload_entry, PLATFORMS
@@ -95,3 +98,52 @@ async def test_async_unload_entry(hass: HomeAssistant, mock_entry) -> None:
 
     assert result is True
     mock_unload.assert_awaited_once_with(mock_entry, PLATFORMS)
+
+
+# ---------------------------------------------------------------------------
+# Hub not answering at start-up: retry, don't fail for good (27/09/2026)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionRefusedError("refused"),
+        OSError("no route to host"),
+        ValueError("empty reply from hub"),
+        KeyError("payload"),
+    ],
+)
+async def test_setup_not_ready_when_hub_does_not_answer(
+    hass: HomeAssistant, mock_entry, mock_hub_client_instance, error
+) -> None:
+    """A hub that fails at start-up asks Home Assistant to retry later."""
+    mock_hub_client_instance.get_hub_status = AsyncMock(side_effect=error)
+
+    with (
+        patch("custom_components.rako.HubClient", return_value=mock_hub_client_instance),
+        patch.object(
+            hass.config_entries, "async_forward_entry_setups", new_callable=AsyncMock
+        ) as mock_forward,
+        pytest.raises(ConfigEntryNotReady),
+    ):
+        await async_setup_entry(hass, mock_entry)
+
+    mock_hub_client_instance.drop_command_connection.assert_called_once()
+    mock_forward.assert_not_awaited()
+
+
+async def test_setup_not_ready_when_hub_hangs(
+    hass: HomeAssistant, mock_entry, mock_hub_client_instance
+) -> None:
+    """A hub that never answers times out instead of holding start-up."""
+    async def hang():
+        await asyncio.sleep(3600)
+
+    mock_hub_client_instance.get_hub_status = AsyncMock(side_effect=hang)
+
+    with (
+        patch("custom_components.rako.HubClient", return_value=mock_hub_client_instance),
+        patch("custom_components.rako.SETUP_TIMEOUT", 0.05),
+        pytest.raises(ConfigEntryNotReady),
+    ):
+        await async_setup_entry(hass, mock_entry)

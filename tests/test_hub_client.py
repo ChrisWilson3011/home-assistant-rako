@@ -7,8 +7,18 @@ from homeassistant.core import HomeAssistant
 
 from rakopy.model import LevelChangedEvent, SceneChangedEvent
 
-from custom_components.rako.hub_client import HubClient, subscribe_to_events
-from tests.conftest import MOCK_HOST, MOCK_HUB_ID, MOCK_NAME
+import pytest
+from rakopy.model import Level
+
+from custom_components.rako.hub_client import (
+    RECONNECT_DELAY_MAX,
+    RECONNECT_DELAY_MIN,
+    HubClient,
+    resync_levels,
+    run_event_listener,
+    subscribe_to_events,
+)
+from tests.conftest import MOCK_HOST, MOCK_HUB_ID, MOCK_NAME, make_channel_level
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +156,8 @@ async def test_try_start_only_on_first_entity(hass: HomeAssistant) -> None:
     mock_entry.runtime_data = {"hub_id": MOCK_HUB_ID}
     hass.config_entries.async_get_entry = MagicMock(return_value=mock_entry)
 
-    # Patch subscribe_to_events to avoid real coroutine
-    with patch("custom_components.rako.hub_client.subscribe_to_events", new_callable=AsyncMock):
+    # Patch the listener to avoid a real (long-running) coroutine
+    with patch("custom_components.rako.hub_client.run_event_listener", new_callable=AsyncMock):
         await client.add_light(_mock_entity("l1"))
         task = client._event_listener_task
         assert task is not None
@@ -155,6 +165,7 @@ async def test_try_start_only_on_first_entity(hass: HomeAssistant) -> None:
         await client.add_light(_mock_entity("l2"))
         # Task should not have been replaced
         assert client._event_listener_task is task
+        await task
 
 
 async def test_try_cancel_only_when_empty(hass: HomeAssistant) -> None:
@@ -376,3 +387,118 @@ async def test_subscribe_level_changed_updates_switch(hass: HomeAssistant) -> No
     await _run_subscribe_with_events(client, [event])
 
     assert switch.level == 255
+
+
+# ---------------------------------------------------------------------------
+# run_event_listener - reconnect after the hub drops the feed (27/09/2026)
+# ---------------------------------------------------------------------------
+
+async def _run_listener(subscribe_effects, resync_effects=None):
+    """Run run_event_listener with the feed and resync patched.
+
+    The last subscribe effect should be CancelledError, which ends the loop the
+    way cancelling the task does. Returns (sleep mock, resync mock).
+    """
+    client = MagicMock()
+    sleep = AsyncMock()
+    resync = AsyncMock(side_effect=resync_effects)
+    with (
+        patch("custom_components.rako.hub_client.subscribe_to_events",
+              AsyncMock(side_effect=subscribe_effects)),
+        patch("custom_components.rako.hub_client.resync_levels", resync),
+        patch("custom_components.rako.hub_client.asyncio.sleep", sleep),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await run_event_listener(client)
+    return sleep, resync
+
+
+async def test_listener_reconnects_after_feed_error_and_after_feed_end() -> None:
+    """A dropped feed (error or clean end) is reopened, with a resync first."""
+    sleep, resync = await _run_listener(
+        [ConnectionResetError("hub rebooted"), None, asyncio.CancelledError()]
+    )
+
+    # No resync before the first connection; one before each reconnect.
+    assert resync.await_count == 2
+    # A successful resync resets the wait, so both waits are the minimum.
+    assert [c.args[0] for c in sleep.await_args_list] == [RECONNECT_DELAY_MIN] * 2
+
+
+async def test_listener_backs_off_while_hub_unreachable() -> None:
+    """While the hub stays away the wait doubles, capped at the maximum."""
+    sleep, resync = await _run_listener(
+        [ConnectionResetError(), asyncio.CancelledError()],
+        resync_effects=[OSError("no route")] * 5 + [None],
+    )
+
+    assert [c.args[0] for c in sleep.await_args_list] == [
+        RECONNECT_DELAY_MIN, 10, 20, 40, RECONNECT_DELAY_MAX, RECONNECT_DELAY_MAX,
+    ]
+    assert resync.await_count == 6
+
+
+async def test_listener_cancellation_is_not_swallowed() -> None:
+    """Cancelling the task (last entity removed, unload) stops the loop."""
+    sleep, resync = await _run_listener([asyncio.CancelledError()])
+    sleep.assert_not_awaited()
+    resync.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# resync_levels / drop_command_connection
+# ---------------------------------------------------------------------------
+
+async def test_resync_updates_every_entity_type() -> None:
+    """A resync brings lights, covers, switches and scenes up to date."""
+    client = MagicMock()
+    client.hub_id = MOCK_HUB_ID
+    light, cover, switch, scene = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+    client._light_map = {f"{MOCK_HUB_ID}_1_1": light}
+    client._cover_map = {f"{MOCK_HUB_ID}_2_1": cover}
+    client._switch_map = {f"{MOCK_HUB_ID}_11_1": switch}
+    client._scene_map = {f"{MOCK_HUB_ID}_1": scene}
+    client.get_levels = AsyncMock(return_value=[
+        Level(room_id=1, current_scene_id=3, channel_levels=[make_channel_level(1, 40, 200)]),
+        Level(room_id=2, current_scene_id=0, channel_levels=[make_channel_level(1, 255)]),
+        Level(room_id=11, current_scene_id=0, channel_levels=[make_channel_level(1, 0)]),
+    ])
+
+    await resync_levels(client)
+
+    assert light.brightness == 200  # target level wins while fading
+    assert cover.current_cover_position == 255
+    assert switch.level == 0
+    assert scene.current_option == 3
+
+
+async def test_resync_failure_drops_the_command_connection() -> None:
+    """A failed read forgets the half-open socket so the next try reconnects."""
+    client = MagicMock()
+    client.get_levels = AsyncMock(side_effect=ValueError("empty reply"))
+
+    with pytest.raises(ValueError):
+        await resync_levels(client)
+
+    client.drop_command_connection.assert_called_once()
+
+
+async def test_drop_command_connection_closes_and_clears(hass: HomeAssistant) -> None:
+    """The writer is closed and both streams forgotten."""
+    client = _make_hub_client(hass)
+    writer = MagicMock()
+    client._writer = writer
+    client._reader = MagicMock()
+
+    client.drop_command_connection()
+
+    writer.close.assert_called_once()
+    assert client._writer is None
+    assert client._reader is None
+
+
+async def test_drop_command_connection_without_a_connection(hass: HomeAssistant) -> None:
+    """Dropping before anything was opened is harmless."""
+    client = _make_hub_client(hass)
+    client.drop_command_connection()
+    assert client._writer is None
